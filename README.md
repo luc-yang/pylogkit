@@ -547,15 +547,15 @@ uv run pytest --cov=pylogkit --cov-report=html
 
 ```
 pylogkit/
-├── pylogkit/              # 📦 日志库主目录
-│   ├── __init__.py        # 🚪 主模块入口，导出公共 API
-│   ├── core.py            # ❤️ 核心日志功能（基于 loguru）
-│   ├── config.py          # ⚙️ 配置类和工具函数
-│   ├── utils.py           # 🛠️ 实用工具（异常捕获装饰器等）
-│   ├── audit.py           # 📊 审计日志子模块（JSON 结构化）
-│   └── qt_integration.py  # 🎨 PyQt 集成支持（可选依赖）
+├── src/                   # 📦 源代码根目录
+│   └── pylogkit/          # 日志库主目录
+│       ├── __init__.py    # 🚪 主模块入口，导出公共 API
+│       ├── core.py        # ❤️ 核心日志功能（基于 loguru）
+│       ├── config.py      # ⚙️ 配置类和工具函数
+│       ├── utils.py       # 🛠️ 实用工具（异常捕获装饰器等）
+│       ├── audit.py       # 📊 审计日志子模块（JSON 结构化）
+│       └── qt_integration.py  # 🎨 PyQt 集成支持（可选依赖）
 ├── tests/                 # 🧪 测试目录
-├── main.py                # 💡 使用示例
 ├── pyproject.toml         # 📋 项目配置和依赖
 ├── README.md              # 📖 项目文档
 ├── CHANGELOG.md           # 📝 变更日志
