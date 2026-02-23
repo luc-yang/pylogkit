@@ -200,7 +200,7 @@ class TestVersionInfo:
         import pylogkit
 
         assert isinstance(pylogkit.__version__, str)
-        # 版本号应该符合语义化版本格式（如 "0.1.0"）
+        # 版本号应该符合语义化版本格式（如 "1.0.0"）
         parts = pylogkit.__version__.split(".")
         assert len(parts) >= 2
         # 每个部分应该是数字

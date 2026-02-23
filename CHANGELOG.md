@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] - 2026-02-23
+## [1.0.0] - 2026-02-23
 
 ### Added
 - 初始版本发布
@@ -31,5 +31,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Configuration**: 灵活的配置系统，支持环境变量
 - **Cross-platform**: 自动适配各平台的日志存储路径
 
-[Unreleased]: https://github.com/yourusername/pylogkit/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/yourusername/pylogkit/releases/tag/v0.1.0
+[Unreleased]: https://github.com/yourusername/pylogkit/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/yourusername/pylogkit/releases/tag/v1.0.0

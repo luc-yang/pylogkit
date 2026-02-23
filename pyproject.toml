@@ -1,11 +1,11 @@
 [project]
 name = "pylogkit"
-version = "0.1.0"
+version = "1.0.0"
 description = "基于 loguru 的独立日志基础设施，适用于 PyQt 项目"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
-    {name = "PyLogKit Contributors"},
+    {name = "LucYang 杨艺斌"},
 ]
 keywords = ["logging", "loguru", "pyqt", "audit", "json"]
 classifiers = [
