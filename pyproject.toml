@@ -1,9 +1,9 @@
 [project]
 name = "pylogkit"
 version = "1.0.0"
-description = "基于 loguru 的独立日志基础设施，适用于 PyQt 项目"
+description = "基于 loguru 的开箱即用日志封装，采用 init_logging + log + audit 显式初始化模型"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "LucYang 杨艺斌"},
 ]
@@ -11,7 +11,6 @@ keywords = ["logging", "loguru", "pyqt", "audit", "json"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -44,7 +43,6 @@ dev = [
 Homepage = "https://github.com/yourusername/pylogkit"
 Repository = "https://github.com/yourusername/pylogkit"
 Documentation = "https://github.com/yourusername/pylogkit#readme"
-Changelog = "https://github.com/yourusername/pylogkit/blob/main/CHANGELOG.md"
 Issues = "https://github.com/yourusername/pylogkit/issues"
 
 [[tool.uv.index]]

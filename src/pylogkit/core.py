@@ -1,422 +1,468 @@
 """
-日志核心模块 - 基于 loguru 实现
-
-功能特性：
-1. 单例模式管理日志实例
-2. 跨平台默认日志目录
-3. 支持自定义应用名称前缀
-4. 日志格式包含文件名、函数名、行号
-5. 延迟初始化机制
-6. 控制台彩色输出 + 文件输出
-7. 日志轮转、压缩、清理
-8. 完整的类型注解
-
-使用示例：
-
-```python
-from log.core import debug, info, error, get_logger, init_logger
-
-# 方式一：直接使用导出的日志方法
-info("这是一条信息日志")
-error("这是一条错误日志")
-
-# 方式二：获取 logger 实例
-logger = get_logger()
-logger.debug("这是一条调试日志")
-
-# 方式三：自定义初始化
-init_logger(
-    app_name="myapp",
-    log_dir="/path/to/logs",
-    level="DEBUG",
-    rotation="5 MB",
-    retention="14 days"
-)
-```
+Core logging runtime for PyLogKit.
 """
 
-import os
-import platform
+from __future__ import annotations
+
+import json
+import logging
 import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any
 
-from loguru import logger
-from loguru._logger import Logger
+from loguru import logger as _loguru_logger
 
-from .config import get_default_log_dir
+from .config import (
+    DEFAULT_APP_NAME,
+    LogConfig,
+)
 
-# 类型别名
-LoguruLogger = logger.__class__
-
-# 日志级别映射
-LOG_LEVELS = {
-    "DEBUG": "DEBUG",
-    "INFO": "INFO",
-    "WARNING": "WARNING",
-    "ERROR": "ERROR",
-    "CRITICAL": "CRITICAL",
-}
+if TYPE_CHECKING:
+    from .qt_integration import LogSignalEmitter, QtLogHandler
 
 
-class LoggerManager:
-    """
-    日志管理器（单例模式）
+DEFAULT_CONSOLE_FORMAT = (
+    "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> "
+    "| <level>{level: <8}</level> "
+    "| <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> "
+    "| <level>{message}</level>"
+)
+DEFAULT_FILE_FORMAT = (
+    "{time:YYYY-MM-DD HH:mm:ss.SSS} "
+    "| {level: <8} "
+    "| {name}:{function}:{line} "
+    "| {message}"
+)
+DEFAULT_QT_FORMAT = "{time} | {level:<8} | {message}"
 
-    基于 loguru 提供统一的日志管理接口，支持跨平台、彩色输出、日志轮转等功能。
-    """
+_UNSET = object()
 
-    _instance: Optional["LoggerManager"] = None
-    _initialized: bool = False
 
-    def __new__(cls) -> "LoggerManager":
-        """
-        创建单例实例
+class LoggingNotInitializedError(RuntimeError):
+    """Raised when logging is used before init_logging()."""
 
-        Returns:
-            LoggerManager 单例实例
-        """
-        if cls._instance is None:
-            instance = super().__new__(cls)
-            instance._initialized = False
-            cls._instance = instance
-        return cls._instance
+
+def _is_audit_record(record: dict[str, Any]) -> bool:
+    return bool(record["extra"].get("_pylogkit_audit"))
+
+
+def _is_core_record(record: dict[str, Any]) -> bool:
+    return not _is_audit_record(record)
+
+
+class _InterceptHandler(logging.Handler):
+    """Route standard logging records into Loguru."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            level: str | int = _loguru_logger.level(record.levelname).name
+        except ValueError:
+            level = record.levelno
+
+        def patch_record(log_record: dict[str, Any]) -> None:
+            log_record["name"] = record.module
+            log_record["function"] = record.funcName
+            log_record["line"] = record.lineno
+
+        _loguru_logger.patch(patch_record).opt(
+            depth=1, exception=record.exc_info
+        ).log(level, record.getMessage())
+
+
+class LogFacade:
+    """User-facing facade for regular application logs."""
+
+    def __init__(
+        self,
+        manager: LoggingManager,
+        *,
+        bound_logger: Any | None = None,
+        options: dict[str, Any] | None = None,
+        depth: int = 2,
+    ) -> None:
+        self._manager = manager
+        self._bound_logger = bound_logger
+        self._options = options or {}
+        self._depth = depth
+
+    def _resolve_logger(self) -> Any:
+        self._manager.require_initialized()
+        return self._bound_logger or self._manager.base_logger
+
+    def _build_opt_kwargs(self) -> dict[str, Any]:
+        opt_kwargs = dict(self._options)
+        extra_depth = opt_kwargs.pop("depth", 0)
+        if not isinstance(extra_depth, int):
+            raise TypeError("log.opt(depth=...) expects an integer depth")
+        opt_kwargs["depth"] = self._depth + extra_depth
+        return opt_kwargs
+
+    def _emit(self, method_name: str, message: str, *args: Any, **kwargs: Any) -> None:
+        logger = self._resolve_logger()
+        opt_logger = logger.opt(**self._build_opt_kwargs())
+        getattr(opt_logger, method_name)(message, *args, **kwargs)
+
+    def debug(self, message: str, *args: Any, **kwargs: Any) -> None:
+        self._emit("debug", message, *args, **kwargs)
+
+    def info(self, message: str, *args: Any, **kwargs: Any) -> None:
+        self._emit("info", message, *args, **kwargs)
+
+    def success(self, message: str, *args: Any, **kwargs: Any) -> None:
+        self._emit("success", message, *args, **kwargs)
+
+    def warning(self, message: str, *args: Any, **kwargs: Any) -> None:
+        self._emit("warning", message, *args, **kwargs)
+
+    def error(self, message: str, *args: Any, **kwargs: Any) -> None:
+        self._emit("error", message, *args, **kwargs)
+
+    def critical(self, message: str, *args: Any, **kwargs: Any) -> None:
+        self._emit("critical", message, *args, **kwargs)
+
+    def exception(self, message: str, *args: Any, **kwargs: Any) -> None:
+        self._emit("exception", message, *args, **kwargs)
+
+    def bind(self, **kwargs: Any) -> LogFacade:
+        return LogFacade(
+            self._manager,
+            bound_logger=self._resolve_logger().bind(**kwargs),
+            options=dict(self._options),
+            depth=self._depth,
+        )
+
+    def opt(self, **kwargs: Any) -> LogFacade:
+        options = dict(self._options)
+        if "depth" in kwargs and "depth" in options:
+            existing_depth = options.get("depth", 0)
+            requested_depth = kwargs["depth"]
+            if not isinstance(existing_depth, int) or not isinstance(
+                requested_depth, int
+            ):
+                raise TypeError("log.opt(depth=...) expects an integer depth")
+            kwargs = dict(kwargs)
+            kwargs["depth"] = existing_depth + requested_depth
+            options.pop("depth", None)
+        options.update(kwargs)
+        return LogFacade(
+            self._manager,
+            bound_logger=self._bound_logger,
+            options=options,
+            depth=self._depth,
+        )
+
+
+class AuditFacade:
+    """User-facing facade for structured audit logs."""
+
+    _LEVEL_TO_VALUE = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "SUCCESS": 25,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+        "CRITICAL": logging.CRITICAL,
+    }
+
+    def __init__(self, manager: LoggingManager, *, depth: int = 2) -> None:
+        self._manager = manager
+        self._depth = depth
+
+    def _resolve_logger(self) -> Any:
+        config = self._manager.require_initialized()
+        if not config.audit_enabled:
+            raise RuntimeError("Audit logging is disabled.")
+        return self._manager.audit_logger
+
+    def _log(self, level_name: str, action: str, **kwargs: Any) -> None:
+        payload = {"action": action}
+        payload.update(kwargs)
+        record = {
+            "timestamp": datetime.now().isoformat(),
+            "level": self._LEVEL_TO_VALUE[level_name],
+            "level_name": level_name,
+            "action": action,
+            "data": payload,
+        }
+        message = json.dumps(record, ensure_ascii=False, default=str)
+        self._resolve_logger().opt(depth=self._depth).log(level_name, message)
+
+    def debug(self, action: str, **kwargs: Any) -> None:
+        self._log("DEBUG", action, **kwargs)
+
+    def info(self, action: str, **kwargs: Any) -> None:
+        self._log("INFO", action, **kwargs)
+
+    def success(self, action: str, **kwargs: Any) -> None:
+        self._log("SUCCESS", action, **kwargs)
+
+    def warning(self, action: str, **kwargs: Any) -> None:
+        self._log("WARNING", action, **kwargs)
+
+    def error(self, action: str, **kwargs: Any) -> None:
+        self._log("ERROR", action, **kwargs)
+
+    def critical(self, action: str, **kwargs: Any) -> None:
+        self._log("CRITICAL", action, **kwargs)
+
+
+class LoggingManager:
+    """Owns PyLogKit runtime state."""
 
     def __init__(self) -> None:
-        """初始化日志管理器（仅执行一次）"""
-        if self._initialized:
-            return
+        self._logger = _loguru_logger
+        self._config: LogConfig | None = None
+        self._initialized = False
+        self._root_handler: logging.Handler | None = None
+        self._previous_root_handlers: list[logging.Handler] = []
+        self._previous_root_level: int = logging.NOTSET
 
-        self._logger = logger
-        self._is_initialized: bool = False
-        self._log_dir: Path | None = None
-        self._app_name: str = "app"
-        self._config: dict[str, Any] = {}
-        self._console_sink_id: int | None = None
-        self._file_sink_id: int | None = None
-
-        LoggerManager._initialized = True
-
-    def _get_default_log_dir(self) -> Path:
-        """
-        获取跨平台的默认日志目录
-
-        Returns:
-            默认日志目录路径
-        """
-        system = platform.system()
-
-        if system == "Windows":
-            # Windows: %APPDATA%\{app_name}\logs
-            appdata = os.environ.get("APPDATA")
-            if appdata:
-                return Path(appdata) / self._app_name / "logs"
-            else:
-                return Path.home() / "AppData" / "Roaming" / self._app_name / "logs"
-
-        elif system == "Darwin":
-            # macOS: ~/Library/Application Support/{app_name}/logs
-            return (
-                Path.home()
-                / "Library"
-                / "Application Support"
-                / self._app_name
-                / "logs"
-            )
-
-        else:
-            # Linux/Unix: ~/.local/share/{app_name}/logs
-            xdg_data_home = os.environ.get("XDG_DATA_HOME")
-            if xdg_data_home:
-                return Path(xdg_data_home) / self._app_name / "logs"
-            else:
-                return Path.home() / ".local" / "share" / self._app_name / "logs"
-
-    def init_logger(
-        self,
-        app_name: str = "app",
-        log_dir: str | Path | None = None,
-        level: str = "INFO",
-        rotation: str = "10 MB",
-        retention: str = "7 days",
-        encoding: str = "utf-8",
-        console_output: bool = True,
-        file_output: bool = True,
-    ) -> None:
-        """
-        初始化日志配置
-
-        Args:
-            app_name: 应用名称前缀，用于构建默认日志目录和文件名
-            log_dir: 日志文件存储目录，None 时使用跨平台默认目录
-            level: 日志级别，可选值：DEBUG, INFO, WARNING, ERROR, CRITICAL
-            rotation: 日志文件轮转条件，支持大小格式（如 "10 MB"）或时间格式（如 "1 day"）
-            retention: 日志文件保留时间，如 "7 days"
-            encoding: 日志文件编码
-            console_output: 是否输出到控制台
-            file_output: 是否输出到文件
-        """
-        try:
-            # 清除默认配置
-            self._logger.remove()
-            self._console_sink_id = None
-            self._file_sink_id = None
-
-            # 设置应用名称
-            self._app_name = app_name
-
-            # 设置日志目录
-            if log_dir is None:
-                self._log_dir = self._get_default_log_dir()
-            else:
-                self._log_dir = Path(os.path.normpath(log_dir))
-
-            # 创建日志目录
-            self._ensure_log_dir()
-
-            # 控制台日志格式 - 彩色显示
-            console_format = (
-                "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> "
-                "| <level>{level: <8}</level> "
-                "| <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> "
-                "| <level>{message}</level>"
-            )
-
-            # 文件日志格式 - 简洁清晰，包含文件名和行号
-            file_format = (
-                "{time:YYYY-MM-DD HH:mm:ss.SSS} "
-                "| {level: <8} "
-                "| {name}:{function}:{line} "
-                "| {message}"
-            )
-
-            # 添加控制台输出
-            if console_output and sys.stdout is not None:
-                self._console_sink_id = self._logger.add(
-                    sink=sys.stdout,
-                    level=level,
-                    format=console_format,
-                    enqueue=True,
-                    backtrace=True,
-                    diagnose=True,
-                )
-
-            # 添加文件输出
-            if file_output:
-                log_file = self._log_dir / f"{app_name}_{{time:YYYY-MM-DD}}.log"
-                self._file_sink_id = self._logger.add(
-                    sink=str(log_file),
-                    level=level,
-                    format=file_format,
-                    rotation=rotation,
-                    retention=retention,
-                    encoding=encoding,
-                    enqueue=True,
-                    backtrace=True,
-                    diagnose=True,
-                    compression="zip",
-                )
-
-            self._is_initialized = True
-            self._config = {
-                "app_name": app_name,
-                "log_dir": str(self._log_dir),
-                "level": level,
-                "rotation": rotation,
-                "retention": retention,
-                "encoding": encoding,
-                "console_output": console_output,
-                "file_output": file_output,
-            }
-
-            # 记录初始化信息
-            self._logger.info("Logger initialized successfully")
-            self._logger.info(f"Log directory: {self._log_dir.absolute()}")
-            self._logger.info(f"Log level: {level}")
-
-        except Exception as e:
-            print(f"Logger initialization failed: {e}")
-            raise
-
-    def _ensure_log_dir(self) -> None:
-        """
-        确保日志目录存在
-
-        如果创建失败，尝试使用备用目录。
-        """
-        if self._log_dir is None:
-            self._log_dir = get_default_log_dir(self._app_name)
-
-        try:
-            self._log_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            # 如果创建目录失败，使用临时目录作为备选
-            import tempfile
-
-            self._log_dir = (
-                Path(os.path.normpath(tempfile.gettempdir())) / self._app_name / "logs"
-            )
-            self._log_dir.mkdir(parents=True, exist_ok=True)
-
-    def get_logger(self) -> Any:
-        """
-        获取 logger 实例
-
-        如果尚未初始化，使用默认配置自动初始化。
-
-        Returns:
-            loguru.logger 实例
-        """
-        if not self._is_initialized:
-            self.init_logger()
+    @property
+    def base_logger(self) -> Any:
         return self._logger
 
-    def set_level(self, level: str) -> None:
-        """
-        设置日志级别
+    @property
+    def audit_logger(self) -> Any:
+        return self._logger.bind(_pylogkit_audit=True)
 
-        Args:
-            level: 日志级别，可选值：DEBUG, INFO, WARNING, ERROR, CRITICAL
-        """
-        try:
-            # 移除所有 sink
-            self._logger.remove()
-            self._console_sink_id = None
-            self._file_sink_id = None
+    def require_initialized(self) -> LogConfig:
+        if self._config is None or not self._initialized:
+            raise LoggingNotInitializedError(
+                "PyLogKit is not initialized. Call init_logging() at program startup."
+            )
+        return self._config
 
-            # 重新初始化，使用新的日志级别
-            if self._config:
-                self.init_logger(
-                    app_name=self._config.get("app_name", "app"),
-                    log_dir=self._config.get("log_dir"),
-                    level=level,
-                    rotation=self._config.get("rotation", "10 MB"),
-                    retention=self._config.get("retention", "7 days"),
-                    encoding=self._config.get("encoding", "utf-8"),
-                    console_output=self._config.get("console_output", True),
-                    file_output=self._config.get("file_output", True),
-                )
-            else:
-                self.init_logger(level=level)
+    def _build_config(
+        self,
+        app_name: str,
+        *,
+        level: str | None,
+        log_dir: str | Path | None,
+        rotation: str | None,
+        retention: str | None,
+        encoding: str | None,
+        console_output: bool,
+        file_output: bool,
+        capture_stdlib: bool | object,
+        audit_enabled: bool | object,
+    ) -> LogConfig:
+        env_config = LogConfig.from_env(app_name=app_name)
+        resolved_capture_stdlib = (
+            env_config.capture_stdlib
+            if capture_stdlib is _UNSET
+            else bool(capture_stdlib)
+        )
+        resolved_audit_enabled = (
+            env_config.audit_enabled if audit_enabled is _UNSET else bool(audit_enabled)
+        )
 
-            self._logger.info(f"Log level changed to: {level}")
+        return LogConfig(
+            app_name=app_name or DEFAULT_APP_NAME,
+            log_dir=log_dir if log_dir is not None else env_config.log_dir,
+            level=level if level is not None else env_config.level,
+            rotation=rotation if rotation is not None else env_config.rotation,
+            retention=retention if retention is not None else env_config.retention,
+            encoding=encoding if encoding is not None else env_config.encoding,
+            console_output=console_output,
+            file_output=file_output,
+            capture_stdlib=resolved_capture_stdlib,
+            audit_enabled=resolved_audit_enabled,
+        )
 
-        except Exception as e:
-            self._logger.error(f"Failed to set log level: {e}")
-            raise
+    def _install_stdlib_bridge(self) -> None:
+        root_logger = logging.getLogger()
+        self._previous_root_handlers = list(root_logger.handlers)
+        self._previous_root_level = root_logger.level
+        self._root_handler = _InterceptHandler()
+        root_logger.handlers = [self._root_handler]
+        root_logger.setLevel(logging.NOTSET)
 
-    def get_log_dir(self) -> Path | None:
-        """
-        获取日志文件存储目录
+    def _remove_stdlib_bridge(self) -> None:
+        if self._root_handler is None:
+            return
 
-        Returns:
-            日志文件存储目录路径
-        """
-        return self._log_dir
+        root_logger = logging.getLogger()
+        root_logger.handlers = list(self._previous_root_handlers)
+        root_logger.setLevel(self._previous_root_level)
+        self._root_handler = None
+        self._previous_root_handlers = []
+        self._previous_root_level = logging.NOTSET
 
-    def get_config(self) -> dict[str, Any]:
-        """
-        获取当前日志配置
-
-        Returns:
-            配置字典
-        """
-        return self._config.copy()
-
-    def shutdown(self) -> None:
-        """
-        关闭日志管理器
-
-        清理所有 sink 并释放资源。
-        """
+    def _configure_sinks(self, config: LogConfig) -> None:
         self._logger.remove()
-        self._console_sink_id = None
-        self._file_sink_id = None
-        self._is_initialized = False
+
+        if config.console_output and sys.stdout is not None:
+            self._logger.add(
+                sys.stdout,
+                level=config.level,
+                format=DEFAULT_CONSOLE_FORMAT,
+                enqueue=True,
+                backtrace=True,
+                diagnose=True,
+                filter=_is_core_record,
+            )
+
+        if config.file_output:
+            log_file = Path(config.log_dir) / f"{config.app_name}_{{time:YYYY-MM-DD}}.log"
+            self._logger.add(
+                str(log_file),
+                level=config.level,
+                format=DEFAULT_FILE_FORMAT,
+                rotation=config.rotation,
+                retention=config.retention,
+                encoding=config.encoding,
+                enqueue=True,
+                backtrace=True,
+                diagnose=True,
+                compression="zip",
+                filter=_is_core_record,
+            )
+
+        if config.audit_enabled:
+            audit_file = config.audit_log_dir / "audit_{time:YYYY-MM-DD}.jsonl"
+            self._logger.add(
+                str(audit_file),
+                level=config.level,
+                format="{message}",
+                rotation=config.rotation,
+                retention=config.retention,
+                encoding=config.encoding,
+                enqueue=True,
+                catch=True,
+                filter=_is_audit_record,
+            )
+
+    def init_logging(
+        self,
+        app_name: str,
+        *,
+        level: str | None = None,
+        log_dir: str | Path | None = None,
+        rotation: str | None = None,
+        retention: str | None = None,
+        encoding: str | None = None,
+        console_output: bool = True,
+        file_output: bool = True,
+        capture_stdlib: bool | object = _UNSET,
+        audit_enabled: bool | object = _UNSET,
+    ) -> None:
+        config = self._build_config(
+            app_name,
+            level=level,
+            log_dir=log_dir,
+            rotation=rotation,
+            retention=retention,
+            encoding=encoding,
+            console_output=console_output,
+            file_output=file_output,
+            capture_stdlib=capture_stdlib,
+            audit_enabled=audit_enabled,
+        )
+        config.ensure_log_dirs()
+
+        self._remove_stdlib_bridge()
+        self._configure_sinks(config)
+
+        if config.capture_stdlib:
+            self._install_stdlib_bridge()
+
+        self._config = config
+        self._initialized = True
+
+    def attach_qt(
+        self,
+        emitter: LogSignalEmitter | None = None,
+        *,
+        level: str | None = None,
+        format_string: str | None = None,
+    ) -> QtLogHandler:
+        config = self.require_initialized()
+
+        from .qt_integration import QtLogHandler, has_pyqt
+
+        if not has_pyqt():
+            raise RuntimeError(
+                "PyQt support is not available. Install PyQt6 or PyQt5 before "
+                "calling attach_qt()."
+            )
+
+        handler = QtLogHandler(
+            emitter=emitter,
+            format_string=format_string or DEFAULT_QT_FORMAT,
+        )
+        self._logger.add(
+            lambda message: handler.emit(message.record),
+            level=level or config.level,
+            enqueue=True,
+            catch=True,
+            filter=_is_core_record,
+        )
+        return handler
+
+    def shutdown_logging(self) -> None:
+        self._remove_stdlib_bridge()
+        self._logger.remove()
+        self._config = None
         self._initialized = False
-        LoggerManager._instance = None
 
 
-# 创建全局日志管理器实例
-_logger_manager = LoggerManager()
+_logging_manager = LoggingManager()
+log = LogFacade(_logging_manager)
+audit = AuditFacade(_logging_manager)
 
 
-def debug(message: str, *args: Any, **kwargs: Any) -> None:
-    """
-    记录调试级别日志
-
-    Args:
-        message: 日志消息
-        *args: 格式化参数
-        **kwargs: 额外参数
-    """
-    _logger_manager.get_logger().debug(message, *args, **kwargs)
-
-
-def info(message: str, *args: Any, **kwargs: Any) -> None:
-    """
-    记录信息级别日志
-
-    Args:
-        message: 日志消息
-        *args: 格式化参数
-        **kwargs: 额外参数
-    """
-    _logger_manager.get_logger().info(message, *args, **kwargs)
-
-
-def warning(message: str, *args: Any, **kwargs: Any) -> None:
-    """
-    记录警告级别日志
-
-    Args:
-        message: 日志消息
-        *args: 格式化参数
-        **kwargs: 额外参数
-    """
-    _logger_manager.get_logger().warning(message, *args, **kwargs)
+def init_logging(
+    app_name: str,
+    *,
+    level: str | None = None,
+    log_dir: str | Path | None = None,
+    rotation: str | None = None,
+    retention: str | None = None,
+    encoding: str | None = None,
+    console_output: bool = True,
+    file_output: bool = True,
+    capture_stdlib: bool | object = _UNSET,
+    audit_enabled: bool | object = _UNSET,
+) -> None:
+    _logging_manager.init_logging(
+        app_name,
+        level=level,
+        log_dir=log_dir,
+        rotation=rotation,
+        retention=retention,
+        encoding=encoding,
+        console_output=console_output,
+        file_output=file_output,
+        capture_stdlib=capture_stdlib,
+        audit_enabled=audit_enabled,
+    )
 
 
-def error(message: str, *args: Any, **kwargs: Any) -> None:
-    """
-    记录错误级别日志
-
-    Args:
-        message: 日志消息
-        *args: 格式化参数
-        **kwargs: 额外参数
-    """
-    _logger_manager.get_logger().error(message, *args, **kwargs)
-
-
-def critical(message: str, *args: Any, **kwargs: Any) -> None:
-    """
-    记录严重错误级别日志
-
-    Args:
-        message: 日志消息
-        *args: 格式化参数
-        **kwargs: 额外参数
-    """
-    _logger_manager.get_logger().critical(message, *args, **kwargs)
+def attach_qt(
+    emitter: LogSignalEmitter | None = None,
+    *,
+    level: str | None = None,
+    format_string: str | None = None,
+) -> QtLogHandler:
+    return _logging_manager.attach_qt(
+        emitter=emitter,
+        level=level,
+        format_string=format_string,
+    )
 
 
-def exception(message: str, *args: Any, **kwargs: Any) -> None:
-    """
-    记录异常级别日志（包含堆栈跟踪）
-
-    Args:
-        message: 日志消息
-        *args: 格式化参数
-        **kwargs: 额外参数
-    """
-    _logger_manager.get_logger().exception(message, *args, **kwargs)
+def shutdown_logging() -> None:
+    _logging_manager.shutdown_logging()
 
 
-# 导出日志管理器实例的方法
-get_logger = _logger_manager.get_logger
-init_logger = _logger_manager.init_logger
-set_level = _logger_manager.set_level
-get_log_dir = _logger_manager.get_log_dir
-get_config = _logger_manager.get_config
-shutdown = _logger_manager.shutdown
+__all__ = [
+    "LoggingNotInitializedError",
+    "LogFacade",
+    "AuditFacade",
+    "init_logging",
+    "attach_qt",
+    "shutdown_logging",
+    "log",
+    "audit",
+]

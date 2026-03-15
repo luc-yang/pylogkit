@@ -1,170 +1,161 @@
 """
-日志配置模块
-
-提供日志相关的配置类和工具函数，完全独立，无外部依赖。
+Logging configuration helpers for PyLogKit.
 """
+
+from __future__ import annotations
 
 import os
 import platform
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-# 环境变量名常量
+# Environment variable names
 ENV_LOG_LEVEL = "LOG_LEVEL"
 ENV_LOG_DIR = "LOG_DIR"
 ENV_LOG_ROTATION = "LOG_ROTATION"
 ENV_LOG_RETENTION = "LOG_RETENTION"
 ENV_LOG_ENCODING = "LOG_ENCODING"
 ENV_LOG_APP_NAME = "LOG_APP_NAME"
+ENV_LOG_CAPTURE_STDLIB = "LOG_CAPTURE_STDLIB"
+ENV_LOG_AUDIT_ENABLED = "LOG_AUDIT_ENABLED"
 
-# 默认值常量
+# Default values
 DEFAULT_LEVEL = "INFO"
 DEFAULT_ROTATION = "10 MB"
 DEFAULT_RETENTION = "7 days"
 DEFAULT_ENCODING = "utf-8"
 DEFAULT_APP_NAME = "app"
 
+_TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
+
+
+def parse_env_bool(value: str | None, default: bool) -> bool:
+    """Parse a boolean environment variable."""
+    if value is None:
+        return default
+
+    normalized = value.strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    return default
+
 
 def get_default_log_dir(app_name: str = DEFAULT_APP_NAME) -> Path:
     """
-    获取跨平台的默认日志目录
+    Return the default log directory for the current platform.
 
-    根据操作系统返回合适的默认日志目录：
+    Paths:
     - Windows: %APPDATA%\\{app_name}\\logs
     - macOS: ~/Library/Application Support/{app_name}/logs
     - Linux/Unix: ~/.local/share/{app_name}/logs
-
-    Args:
-        app_name: 应用名称，用于构建目录路径
-
-    Returns:
-        默认日志目录路径
     """
     system = platform.system()
 
     if system == "Windows":
-        # Windows: %APPDATA%\{app_name}\logs
         appdata = os.environ.get("APPDATA")
         if appdata:
             return Path(appdata) / app_name / "logs"
-        else:
-            return Path.home() / "AppData" / "Roaming" / app_name / "logs"
+        return Path.home() / "AppData" / "Roaming" / app_name / "logs"
 
-    elif system == "Darwin":
-        # macOS: ~/Library/Application Support/{app_name}/logs
+    if system == "Darwin":
         return Path.home() / "Library" / "Application Support" / app_name / "logs"
 
-    else:
-        # Linux/Unix: ~/.local/share/{app_name}/logs
-        xdg_data_home = os.environ.get("XDG_DATA_HOME")
-        if xdg_data_home:
-            return Path(xdg_data_home) / app_name / "logs"
-        else:
-            return Path.home() / ".local" / "share" / app_name / "logs"
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    if xdg_data_home:
+        return Path(xdg_data_home) / app_name / "logs"
+    return Path.home() / ".local" / "share" / app_name / "logs"
 
 
-@dataclass
+@dataclass(slots=True)
 class LogConfig:
-    """
-    日志配置类
+    """Resolved logging configuration used by the runtime."""
 
-    使用 dataclass 简化配置管理，支持从环境变量读取配置。
-
-    Attributes:
-        log_dir: 日志文件存储目录
-        level: 日志级别
-        rotation: 日志文件轮转条件
-        retention: 日志文件保留时间
-        encoding: 日志文件编码
-        app_name: 应用名称前缀
-    """
-
-    log_dir: Path | str = field(default_factory=lambda: get_default_log_dir())
+    app_name: str = DEFAULT_APP_NAME
+    log_dir: Path | str | None = None
     level: str = DEFAULT_LEVEL
     rotation: str = DEFAULT_ROTATION
     retention: str = DEFAULT_RETENTION
     encoding: str = DEFAULT_ENCODING
-    app_name: str = DEFAULT_APP_NAME
+    console_output: bool = True
+    file_output: bool = True
+    capture_stdlib: bool = True
+    audit_enabled: bool = True
 
     def __post_init__(self) -> None:
-        """初始化后处理，确保 log_dir 是 Path 对象"""
-        if isinstance(self.log_dir, str):
-            object.__setattr__(
-                self, "log_dir", Path(os.path.normpath(self.log_dir))
-            )
+        if self.log_dir is None:
+            self.log_dir = get_default_log_dir(self.app_name)
+        else:
+            self.log_dir = Path(os.path.normpath(os.fspath(self.log_dir)))
 
-    def to_dict(self) -> dict:
-        """
-        将配置转换为字典格式
+        self.level = self.level.upper()
 
-        Returns:
-            配置字典
-        """
+    @property
+    def audit_log_dir(self) -> Path:
+        return Path(self.log_dir) / "audit"
+
+    def to_dict(self) -> dict[str, Any]:
         return {
+            "app_name": self.app_name,
             "log_dir": str(self.log_dir),
             "level": self.level,
             "rotation": self.rotation,
             "retention": self.retention,
             "encoding": self.encoding,
-            "app_name": self.app_name,
+            "console_output": self.console_output,
+            "file_output": self.file_output,
+            "capture_stdlib": self.capture_stdlib,
+            "audit_enabled": self.audit_enabled,
         }
 
-    def ensure_log_dir(self) -> None:
+    def ensure_log_dirs(self) -> None:
         """
-        确保日志目录存在
+        Ensure the configured log directory exists.
 
-        如果目录不存在则创建，创建失败时使用临时目录作为备选。
+        If directory creation fails, fall back to the system temporary directory.
         """
-        log_dir = Path(self.log_dir) if isinstance(self.log_dir, str) else self.log_dir
+        log_dir = Path(self.log_dir)
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
+            if self.audit_enabled:
+                self.audit_log_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
             import tempfile
 
-            log_dir = Path(tempfile.gettempdir()) / self.app_name / "logs"
-            log_dir.mkdir(parents=True, exist_ok=True)
-            object.__setattr__(self, "log_dir", log_dir)
+            fallback = Path(tempfile.gettempdir()) / self.app_name / "logs"
+            fallback.mkdir(parents=True, exist_ok=True)
+            object.__setattr__(self, "log_dir", fallback)
+            if self.audit_enabled:
+                self.audit_log_dir.mkdir(parents=True, exist_ok=True)
 
     @classmethod
-    def from_env(cls, app_name: str | None = None) -> "LogConfig":
-        """
-        从环境变量读取配置创建 LogConfig 实例
+    def from_env(cls, app_name: str | None = None) -> LogConfig:
+        """Build a configuration object from environment variables."""
+        resolved_app_name = app_name or os.environ.get(
+            ENV_LOG_APP_NAME, DEFAULT_APP_NAME
+        )
 
-        支持的环境变量：
-        - LOG_LEVEL: 日志级别
-        - LOG_DIR: 日志目录
-        - LOG_ROTATION: 轮转条件
-        - LOG_RETENTION: 保留时间
-        - LOG_ENCODING: 文件编码
-        - LOG_APP_NAME: 应用名称
-
-        Args:
-            app_name: 应用名称，如果为 None 则从环境变量读取
-
-        Returns:
-            LogConfig 实例
-        """
-        # 确定应用名称
-        _app_name = app_name or os.environ.get(ENV_LOG_APP_NAME, DEFAULT_APP_NAME)
-
-        # 从环境变量读取配置
-        level = os.environ.get(ENV_LOG_LEVEL, DEFAULT_LEVEL)
-        rotation = os.environ.get(ENV_LOG_ROTATION, DEFAULT_ROTATION)
-        retention = os.environ.get(ENV_LOG_RETENTION, DEFAULT_RETENTION)
-        encoding = os.environ.get(ENV_LOG_ENCODING, DEFAULT_ENCODING)
-
-        # 日志目录
         log_dir_env = os.environ.get(ENV_LOG_DIR)
+        log_dir: Path | str | None
         if log_dir_env:
             log_dir = Path(os.path.normpath(log_dir_env))
         else:
-            log_dir = get_default_log_dir(_app_name)
+            log_dir = get_default_log_dir(resolved_app_name)
 
         return cls(
+            app_name=resolved_app_name,
             log_dir=log_dir,
-            level=level,
-            rotation=rotation,
-            retention=retention,
-            encoding=encoding,
-            app_name=_app_name,
+            level=os.environ.get(ENV_LOG_LEVEL, DEFAULT_LEVEL),
+            rotation=os.environ.get(ENV_LOG_ROTATION, DEFAULT_ROTATION),
+            retention=os.environ.get(ENV_LOG_RETENTION, DEFAULT_RETENTION),
+            encoding=os.environ.get(ENV_LOG_ENCODING, DEFAULT_ENCODING),
+            capture_stdlib=parse_env_bool(
+                os.environ.get(ENV_LOG_CAPTURE_STDLIB), True
+            ),
+            audit_enabled=parse_env_bool(
+                os.environ.get(ENV_LOG_AUDIT_ENABLED), True
+            ),
         )
